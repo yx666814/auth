@@ -1,0 +1,41 @@
+# Non-secret configuration shared by the API and the migration job.
+#
+# DATABASE_URL is deliberately NOT set here: Kubernetes only expands $(VAR)
+# inside a container's own `env` list, referencing entries defined *above* it,
+# and never inside ConfigMap data. Each workload therefore composes it from
+# POSTGRES_* right before starting (see 04-migrate-job.yaml and 05-backend.yaml).
+#
+# Change POSTGRES_HOST / REDIS_HOST when you are not running the in-cluster
+# databases.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-config
+  namespace: enterprise-auth
+  labels:
+    app.kubernetes.io/name: enterprise-auth
+    app.kubernetes.io/component: backend
+data:
+  DEBUG: "false"
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: authdb
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  REDIS_DB: "0"
+  REDIS_MAX_CONNECTIONS: "50"
+  JWT_ISSUER: enterprise-auth-system
+  JWT_AUDIENCE: enterprise-auth-api
+  ACCESS_TOKEN_EXPIRE_MINUTES: "15"
+  REFRESH_TOKEN_EXPIRE_DAYS: "7"
+  MAX_LOGIN_ATTEMPTS: "5"
+  LOCKOUT_DURATION_MINUTES: "15"
+  CAPTCHA_EXPIRE_SECONDS: "300"
+  EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS: "24"
+  SMTP_PORT: "587"
+  SMTP_USE_TLS: "true"
+  # The browser only ever talks to the frontend origin, so CORS can stay shut.
+  ALLOWED_ORIGINS: "[]"
+  DEFAULT_TENANT_ID: 550e8400-e29b-41d4-a716-446655440000
+  DEFAULT_TENANT_SLUG: default
+  DEFAULT_TENANT_NAME: Default Tenant

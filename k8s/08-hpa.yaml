@@ -1,0 +1,72 @@
+# Horizontal Pod Autoscalers.
+#
+# Requires metrics-server in the cluster. Both workloads are stateless with
+# respect to their pods — sessions live in Redis and refresh tokens in
+# Postgres — so scaling out is safe without sticky sessions.
+#
+# CPU is the trigger because these are I/O-bound (Argon2 is deliberately
+# CPU-heavy, so login spikes do show up as CPU pressure on the API).
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: backend
+  namespace: enterprise-auth
+  labels:
+    app.kubernetes.io/name: enterprise-auth
+    app.kubernetes.io/component: backend
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: backend
+  minReplicas: 2
+  maxReplicas: 10
+  behavior:
+    scaleUp:
+      # Password hashing makes login bursts sharp; react quickly.
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 30
+    scaleDown:
+      # Slow decay: dropping capacity mid-login-storm is worse than paying for
+      # one extra replica for a few minutes.
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: frontend
+  namespace: enterprise-auth
+  labels:
+    app.kubernetes.io/name: enterprise-auth
+    app.kubernetes.io/component: frontend
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: frontend
+  minReplicas: 2
+  maxReplicas: 6
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 75

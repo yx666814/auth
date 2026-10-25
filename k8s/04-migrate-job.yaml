@@ -1,0 +1,78 @@
+# One-shot schema migration. It reuses the backend image so the migration code
+# always matches the application version that follows it.
+#
+# A Job's pod template is immutable, so re-applying an edited Job fails. Delete
+# the old one first on each release:
+#
+#   kubectl -n enterprise-auth delete job migrate --ignore-not-found
+#   kubectl -n enterprise-auth apply -f k8s/04-migrate-job.yaml
+#
+# The backend Deployment only starts once this Job has completed.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: migrate
+  namespace: enterprise-auth
+  labels:
+    app.kubernetes.io/name: enterprise-auth
+    app.kubernetes.io/component: migration
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: enterprise-auth
+        app.kubernetes.io/component: migration
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: alembic
+          image: enterprise-auth/backend:latest
+          imagePullPolicy: IfNotPresent
+          command: ["alembic", "upgrade", "head"]
+          env:
+            # Listed explicitly so DATABASE_URL below can interpolate them:
+            # Kubernetes expands $(VAR) only from entries defined earlier in
+            # this same env list, not from envFrom.
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef: { name: app-secrets, key: POSTGRES_USER }
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: app-secrets, key: POSTGRES_PASSWORD }
+            - name: POSTGRES_HOST
+              valueFrom:
+                configMapKeyRef: { name: backend-config, key: POSTGRES_HOST }
+            - name: POSTGRES_PORT
+              valueFrom:
+                configMapKeyRef: { name: backend-config, key: POSTGRES_PORT }
+            - name: POSTGRES_DB
+              valueFrom:
+                configMapKeyRef: { name: backend-config, key: POSTGRES_DB }
+            - name: DATABASE_URL
+              value: postgresql+asyncpg://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):$(POSTGRES_PORT)/$(POSTGRES_DB)
+          envFrom:
+            - configMapRef:
+                name: backend-config
+            - secretRef:
+                name: app-secrets
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

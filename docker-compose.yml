@@ -1,0 +1,122 @@
+# Development stack.
+#
+#   docker compose up --build
+#
+# Every value has a development default, so no .env file is needed. To override
+# one, copy .env.example to .env — but note that the values in it are written
+# for production (a real SMTP relay, a real frontend URL), which is not what you
+# want locally.
+#
+# UI ............ http://localhost:5173
+# API ........... http://localhost:8000/api/docs
+# Mail (MailHog) http://localhost:8025
+#
+# The Vite dev server proxies /api to the backend, so the browser sees one
+# origin in development exactly as it will behind nginx in production.
+
+name: enterprise-auth
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-auth}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-auth}
+      POSTGRES_DB: ${POSTGRES_DB:-authdb}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "no", "--save", ""]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Catches registration emails in development; nothing is delivered.
+  mailhog:
+    image: mailhog/mailhog:v1.0.1
+    restart: unless-stopped
+    ports:
+      - "1025:1025" # SMTP
+      - "8025:8025" # web UI
+
+  backend:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    command:
+      - sh
+      - -c
+      - |
+        alembic upgrade head &&
+        exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    environment:
+      DEBUG: ${DEBUG:-true}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-auth}:${POSTGRES_PASSWORD:-auth}@postgres:5432/${POSTGRES_DB:-authdb}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-development-only-secret-change-me-please-32}
+      JWT_ISSUER: ${JWT_ISSUER:-enterprise-auth-system}
+      JWT_AUDIENCE: ${JWT_AUDIENCE:-enterprise-auth-api}
+      SMTP_HOST: mailhog
+      SMTP_PORT: "1025"
+      SMTP_USE_TLS: "false"
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-noreply@example.com}
+      # Fixed rather than read from .env: verification links must point at the
+      # dev server whatever the shared .env says.
+      FRONTEND_URL: http://localhost:5173
+      DEFAULT_TENANT_ID: ${DEFAULT_TENANT_ID:-550e8400-e29b-41d4-a716-446655440000}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-["http://localhost:5173"]}
+    ports:
+      - "8000:8000"
+    volumes:
+      # Live code reload; the image's site-packages stay untouched.
+      - ./backend/app:/srv/app/app:ro
+      - ./backend/alembic:/srv/app/alembic:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+
+  frontend:
+    image: node:20-alpine
+    restart: unless-stopped
+    working_dir: /app
+    command: sh -c "npm install --no-audit --no-fund && npm run dev -- --host 0.0.0.0"
+    environment:
+      VITE_PROXY_TARGET: http://backend:8000
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      # Keep the container's node_modules instead of the host's (or a stale
+      # empty directory bind-mounted over it).
+      - frontend-node-modules:/app/node_modules
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
+  frontend-node-modules:

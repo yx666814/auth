@@ -1,0 +1,46 @@
+# Public entry point.
+#
+# Everything goes to the frontend Service: nginx serves the SPA and proxies
+# /api to the backend. There is no separate /api Ingress rule on purpose —
+# exposing the API on its own hostname would force CORS back on and split the
+# origin the CSP is written against.
+#
+# TLS is terminated here. The cert-manager annotation below is worth keeping
+# only if the cluster runs cert-manager; alternatively reference an existing
+# Secret by name and drop the annotation.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: frontend
+  namespace: enterprise-auth
+  labels:
+    app.kubernetes.io/name: enterprise-auth
+    app.kubernetes.io/component: frontend
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    # The auth cookies/tokens are not cookies, but the API responses must never
+    # be cached by a proxy.
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-body-size: "1m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "30"
+    # Keep the "no-store" headers nginx sends; the ingress must not overwrite.
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - auth.example.com
+      secretName: enterprise-auth-tls
+  rules:
+    - host: auth.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  name: http
