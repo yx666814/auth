@@ -257,7 +257,7 @@ class RefreshTokenRepository:
             )
         )
 
-    async def rotate(self, token: str) -> tuple["RotatedRefreshToken" | None, bool]:
+    async def rotate(self, token: str) -> "tuple[RotatedRefreshToken | None, bool]":
         """Consume a refresh token and atomically issue its successor.
 
         Returns ``(new_record, replay_detected)``. A previously rotated token
