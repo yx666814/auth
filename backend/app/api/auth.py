@@ -7,9 +7,11 @@ from uuid import UUID
 
 import jwt
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..core.jwt_keys import get_key_manager
 from ..dependencies import (
     build_auth_service,
     get_auth_service,
@@ -24,6 +26,23 @@ from ..services.auth_service import AccountLockedError, AuthenticationError, Aut
 from ..services.captcha_service import CaptchaService
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
+
+
+@router.get("/jwks", include_in_schema=False)
+async def jwks() -> JSONResponse:
+    """Public signing keys, so other systems can verify access tokens themselves.
+
+    Only public key material is published. A verifier picks the key whose
+    ``kid`` matches the token header; during a rotation both the new and the
+    retired key are listed, which is why rotating does not sign anyone out.
+
+    Cached for five minutes: verifiers fetch this rarely, and the window is
+    shorter than the overlap a rotation keeps, so nobody is left holding a
+    document without the key that signed the token they just received.
+    """
+    response = JSONResponse(get_key_manager().jwks())
+    response.headers["Cache-Control"] = "public, max-age=300"
+    return response
 
 
 @router.get("/captcha")

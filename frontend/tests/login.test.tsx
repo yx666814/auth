@@ -22,6 +22,7 @@ const profile = {
   email: 'a@b.co',
   email_verified: true,
   is_active: true,
+  roles: ['user'],
   created_at: '2024-01-01T00:00:00Z',
 }
 
@@ -47,7 +48,7 @@ describe('LoginPage', () => {
           access_token: 'access',
           refresh_token: 'refresh',
           token_type: 'bearer',
-          user: { id: 'u1', email: 'a@b.co', email_verified: true },
+          user: { id: 'u1', email: 'a@b.co', email_verified: true, roles: ['user'] },
         })
       }
       if (path.endsWith('/users/me')) return jsonResponse(profile)

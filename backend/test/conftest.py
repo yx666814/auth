@@ -30,7 +30,8 @@ os.environ.setdefault(
 os.environ.setdefault("REDIS_HOST", os.environ.get("TEST_REDIS_HOST", "localhost"))
 os.environ.setdefault("REDIS_PORT", os.environ.get("TEST_REDIS_PORT", "6379"))
 os.environ.setdefault("REDIS_DB", "15")  # keep test cache out of the dev database's
-os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-that-is-at-least-32-characters")
+# No signing key is configured on purpose: DEBUG=true makes the key manager mint
+# an ephemeral RSA pair, which is fast and keeps tokens from surviving a run.
 os.environ.setdefault("SMTP_HOST", "localhost")
 os.environ.setdefault("SMTP_PORT", "1025")
 os.environ.setdefault("FRONTEND_URL", "http://localhost:5173")

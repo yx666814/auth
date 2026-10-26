@@ -7,9 +7,13 @@ Kubernetes deployment manifests.
 Feature set:
 
 - **Argon2id** password hashing (not bcrypt, not PBKDF2).
-- **Short-lived access tokens** (JWT, 15 min) plus **rotating refresh tokens**
-  (7 days). Only SHA-256 hashes of refresh tokens are stored, so a database
-  leak does not hand out live sessions.
+- **RS256 access tokens** (JWT, 15 min) signed with a private key this service
+  never shares, published as a **JWKS** so other systems can verify them without
+  being able to forge one.
+- **Rotating refresh tokens** (7 days). Only SHA-256 hashes of refresh tokens
+  are stored, so a database leak does not hand out live sessions.
+- **Roles in the token** (`roles` claim) for downstream authorization, with an
+  admin API for assigning them.
 - **Replay detection** — reusing an already-rotated refresh token is treated as
   a compromise and revokes every session for that user.
 - **Per-account lockout** after repeated failures, and **per-IP rate limiting**
@@ -44,17 +48,19 @@ cache flush must not hand an attacker a fresh set of password attempts.
 ```
 backend/
   app/
-    api/            route handlers (auth, user)
-    core/           settings and cryptography (JWT, blacklist)
+    api/            route handlers (auth, user, admin)
+    core/           settings, role vocabulary, JWT signing keys (JWKS)
     middleware/     Redis-backed rate limiting
     models/         SQLAlchemy models (Tenant, User, RefreshToken, EmailVerificationToken)
     repositories/   data access, always tenant-scoped
     schemas/        pydantic request/response contracts
     services/       auth, captcha, email
-    dependencies.py FastAPI dependency wiring
+    dependencies.py FastAPI dependency wiring, role guards
     main.py         application factory, middleware, lifespan
   alembic/          migrations
   test/             pytest suite (needs real Postgres + Redis)
+scripts/
+  generate-jwt-key.sh   writes secrets/jwt-private.pem (git-ignored)
 frontend/
   src/
     api/client.ts        HTTP client, single-flight token refresh
@@ -85,10 +91,12 @@ it — but that file is written for production (real SMTP relay, real
 Registration emails are captured by MailHog — open it to get the verification
 link. Migrations run automatically when the backend container starts.
 
-The development defaults are deliberately unsafe (known JWT secret, `auth`
-database password). They are refused in production because
-`docker-compose.prod.yml` uses `${VAR:?}` for the sensitive values and the
-backend rejects a short `JWT_SECRET_KEY` whenever `DEBUG=false`.
+The development defaults are deliberately unsafe (known database password, no
+signing key). Production refuses them: `docker-compose.prod.yml` uses
+`${VAR:?}` for the sensitive values, and outside `DEBUG=true` the backend
+refuses to start without a signing key. Locally, `DEBUG=true` makes it mint an
+ephemeral RSA key pair at start-up — fine for a throwaway stack, but tokens die
+with the process, so a `--reload` restart signs everyone out.
 
 ## Running without Docker
 
@@ -99,6 +107,8 @@ cd backend
 python -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env            # point DATABASE_URL at a real Postgres
+../scripts/generate-jwt-key.sh  # or set DEBUG=true for an ephemeral key
+# then set JWT_PRIVATE_KEY_PATH in backend/.env
 alembic upgrade head
 uvicorn app.main:app --reload   # http://localhost:8000
 ```
@@ -127,9 +137,13 @@ Settings come from the environment via `pydantic-settings`
 | `DATABASE_URL` | `postgresql+asyncpg://auth:auth@localhost:5432/authdb` | asyncpg driver, not psycopg |
 | `REDIS_HOST` / `REDIS_PORT` / `REDIS_DB` | `localhost` / `6379` / `0` | `REDIS_URL` overrides all three |
 | `REDIS_MAX_CONNECTIONS` | `50` | pool size |
-| `JWT_SECRET_KEY` | `""` | **required**; must be ≥ 32 chars when `DEBUG=false` |
+| `JWT_PRIVATE_KEY` / `JWT_PRIVATE_KEY_PATH` | `""` | **required** when `DEBUG=false`; PEM inline or a file. Newlines in an inline value may be written as `\n` |
+| `JWT_PUBLIC_KEY` / `JWT_PUBLIC_KEY_PATH` | `""` | optional; derived from the private key when unset. Set it only for a verify-only process |
+| `JWT_KEY_ID` | `auth-1` | goes into the token's `kid` header; change it when you rotate |
+| `JWT_PREVIOUS_PUBLIC_KEYS` | `""` | JSON `kid -> PEM` of retired keys; keeps their tokens verifiable |
+| `JWT_ALGORITHM` | `RS256` | pinned; `HS256` is refused (a shared secret lets verifiers mint tokens) |
 | `JWT_ISSUER` / `JWT_AUDIENCE` | `enterprise-auth-system` / `enterprise-auth-api` | verified on every decode |
-| `ACCESS_TOKEN_EXPIRE_MINUTES` | `15` | |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | `15` | also the maximum staleness of the `roles` claim |
 | `REFRESH_TOKEN_EXPIRE_DAYS` | `7` | sliding: rotation issues a full-lifetime token |
 | `MAX_LOGIN_ATTEMPTS` | `5` | failures before lockout |
 | `LOCKOUT_DURATION_MINUTES` | `15` | |
@@ -140,6 +154,7 @@ Settings come from the environment via `pydantic-settings`
 | `FRONTEND_URL` | `http://localhost:5173` | base of the verification link |
 | `ALLOWED_ORIGINS` | `["http://localhost:5173"]` | JSON list; `[]` behind a same-origin proxy |
 | `DEFAULT_TENANT_ID` | `550e8400-e29b-41d4-a716-446655440000` | public endpoints always resolve here |
+| `BOOTSTRAP_ADMIN_EMAILS` | `[]` | JSON list; these addresses register with the `admin` role |
 | `SECURITY_CSP`, `SECURITY_HSTS_ENABLED`, `SECURITY_HSTS_MAX_AGE_SECONDS` | see config | security headers |
 
 ## API
@@ -149,20 +164,27 @@ All routes are under `/api`. Every error is JSON `{"detail": "..."}`.
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
 | `GET` | `/auth/captcha` | — | `{token, image}`; image is a `data:image/png;base64,` URL |
+| `GET` | `/auth/jwks` | — | Public signing keys (JWKS) for verifying access tokens elsewhere |
 | `POST` | `/auth/register` | — | Create account, send verification email. `201` |
 | `POST` | `/auth/login` | — | Returns access + refresh token and a user summary |
 | `POST` | `/auth/refresh` | — | Rotate refresh token; the old one stops working |
 | `POST` | `/auth/verify-email?token=&user_id=` | — | Consume a verification link |
 | `POST` | `/auth/logout` | Bearer | Blacklist the access token, revoke all refresh tokens. `204` |
-| `GET` | `/users/me` | Bearer | Current profile |
+| `GET` | `/users/me` | Bearer | Current profile, including `roles` |
+| `GET` | `/admin/roles` | Bearer + `admin` | Role vocabulary and its meaning |
+| `GET` | `/admin/users?limit=&offset=` | Bearer + `admin` | Accounts in the caller's tenant, oldest first |
+| `POST` | `/admin/users/{id}/roles` | Bearer + `admin` | Replace an account's roles with `{"roles": [...]}` |
 | `GET` | `/health` | — | `{"status": "ok"}`, used by probes |
 
 Status codes worth knowing:
 
 | Code | Meaning |
 | --- | --- |
-| `400` | Wrong/expired captcha, duplicate email, invalid verification token |
-| `401` | Bad credentials, invalid/blacklisted token, bad refresh token |
+| `400` | Wrong/expired captcha, duplicate email, invalid verification token, unknown role |
+| `401` | Bad credentials, invalid/blacklisted token, bad refresh token — the caller is not identified |
+| `403` | The caller is identified but lacks the required role. Do not prompt for a new login |
+| `404` | No such account in the caller's tenant |
+| `409` | Refused to remove the last administrator |
 | `422` | Validation failure (e.g. password policy) |
 | `423` | Account locked |
 | `429` | Rate limited; `Retry-After` is the window length (60s), not the time left in it |
@@ -172,6 +194,73 @@ known common password, and no three identical consecutive characters.
 
 Rate limits (per IP, fixed window in Redis): register 5/min, login 10/min,
 refresh 20/min.
+
+## Tokens and JWKS
+
+Access tokens are **RS256** (asymmetric): this service signs with a private key
+that never leaves it, and publishes the matching public key at
+`GET /api/auth/jwks` so any other system can *verify* tokens without being able
+to mint them. With an HMAC secret (`HS256`) every verifier would also be a
+signer, which is the wrong contract for an integration point.
+
+The token is meant to be consumed by other services:
+
+```json
+{
+  "sub": "…user id…", "tenant_id": "…", "jti": "…",
+  "type": "access", "roles": ["admin", "user"],
+  "iat": 1730000000, "exp": 1730000900,
+  "iss": "enterprise-auth-system", "aud": "enterprise-auth-api"
+}
+```
+
+Consumers should check, in this order: signature against the JWKS key named by
+the token's `kid`, `iss`, `aud`, `exp`, and `type == "access"` (the JOSE header
+also carries `typ: "at"`, per RFC 9068). The JWKS response is cached for 5
+minutes, so fetch it lazily and keep the keys warm.
+
+**Key rotation does not sign anyone out.** Tokens name their key in the `kid`
+header. To rotate:
+
+1. `./scripts/generate-jwt-key.sh` with a new `JWT_KEY_ID` (it will not
+   overwrite the existing file — move it aside first).
+2. Add the *old* public key to `JWT_PREVIOUS_PUBLIC_KEYS` (JSON `kid -> PEM`)
+   and restart. The JWKS now lists the new key first and the old one after it.
+3. Keep the old entry for at least `ACCESS_TOKEN_EXPIRE_MINUTES` (15 minutes;
+   30 is comfortable), then remove it.
+
+Without step 2 tokens issued before the switch stop verifying at once, and
+every user has to log in again.
+
+## Roles
+
+A role here *is* a permission: `roles` in the token is the list of strings a
+consumer should recognise. The vocabulary (`backend/app/core/roles.py`) is
+`admin`, `support`, `user`; `admin` is a superuser role that satisfies every
+gate, so adding a check never needs the admin list updated. Role assignment is
+`POST /api/admin/users/{id}/roles` with `{"roles": ["user", "support"]}`; the
+list replaces the old one.
+
+Roles are copied into the access token at issue time, so **a downstream system
+authorizes from a snapshot** — at most `ACCESS_TOKEN_EXPIRE_MINUTES` (15 min)
+stale. This service's own gates re-read `users.roles` on each request (the row
+is loaded anyway), so a demotion takes effect here immediately even while the
+old token still claims the old role. Revoking a role is therefore not enough to
+kick someone out of an external system: also end their session, or let the
+token expire.
+
+The API refuses to remove the last administrator (`409`), because that would
+leave nobody able to assign roles, with no way back short of editing the
+database.
+
+### Bootstrapping the first administrator
+
+Nobody can grant the first admin through the API, so registration is the only
+path. Put the address in `BOOTSTRAP_ADMIN_EMAILS` (a JSON list) *before* it
+registers; that account is created with `admin`. The list is configuration, not
+client input, so it cannot be used to self-promote. Afterwards, an existing
+admin can promote anyone else — leave the variable set only if that address
+should stay admin if it ever re-registers in a fresh database.
 
 ## Security notes
 
@@ -196,6 +285,15 @@ refresh 20/min.
 - **TLS is terminated at nginx / the Ingress.** HSTS is emitted by the backend
   when `DEBUG=false` and by nginx; both are only meaningful over HTTPS, so do
   not serve production over plain HTTP.
+- **The signing key is the whole trust anchor.** Anyone holding it can mint a
+  token for any user and any role, in this system and in every system that
+  verifies against the JWKS. Keep it out of the image, out of git, out of
+  environment variables where you can (a mounted file or a secret store), and
+  rotate it if it may have leaked — at which point old tokens must be allowed
+  to expire, not carried over in `JWT_PREVIOUS_PUBLIC_KEYS`.
+- **`roles` in a token is a snapshot, not a live permission check.** It is
+  correct for authorization in downstream systems and stale by up to 15 minutes.
+  This service ignores it for its own gates and reads `users.roles` instead.
 - **The K8s Secret is a template.** `k8s/02-secret.yaml.example` contains
   `CHANGE_ME_*` placeholders and must be created from real values
   (`kubectl create secret generic ...`). Committing a filled-in Secret defeats
@@ -225,21 +323,26 @@ Docker Compose:
 
 ```bash
 cp .env.example .env                     # every REQUIRED value must be real
+./scripts/generate-jwt-key.sh            # writes secrets/jwt-private.pem
 docker compose -f docker-compose.prod.yml up -d --build
 ```
 
 Only the frontend publishes a port; nginx proxies `/api` to the backend over
 the compose network. Migrations run as a one-shot `migrate` service that must
-complete before the API starts.
+complete before the API starts. The signing key is bind-mounted read-only from
+`./secrets`, not passed as an environment variable, so it stays out of
+`docker inspect` and crash dumps.
 
 Kubernetes — apply in filename order:
 
 ```bash
+./scripts/generate-jwt-key.sh
 kubectl apply -f k8s/00-namespace.yaml
 kubectl create secret generic app-secrets -n enterprise-auth \
   --from-literal=POSTGRES_USER=auth \
   --from-literal=POSTGRES_PASSWORD="$(openssl rand -base64 24)" \
-  --from-literal=JWT_SECRET_KEY="$(openssl rand -base64 48)" \
+  --from-file=JWT_PRIVATE_KEY=secrets/jwt-private.pem \
+  --from-literal=JWT_KEY_ID=auth-1 \
   --from-literal=SMTP_HOST=smtp.example.com \
   --from-literal=SMTP_USER=... \
   --from-literal=SMTP_PASSWORD=... \

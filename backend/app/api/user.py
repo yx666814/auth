@@ -8,12 +8,13 @@ router = APIRouter(prefix="/users", tags=["users"])
 
 
 @router.get("/me")
-async def me(principal: AuthenticatedUser = Depends(get_authenticated_user)) -> dict[str, str | bool]:
+async def me(principal: AuthenticatedUser = Depends(get_authenticated_user)) -> dict[str, object]:
     user = principal.user
     return {
         "id": str(user.id),
         "email": user.email,
         "email_verified": user.email_verified,
         "is_active": user.is_active,
+        "roles": list(principal.roles),
         "created_at": user.created_at.isoformat(),
     }

@@ -12,6 +12,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .core.security import check_token_blacklist, decode_access_token
+from .core.roles import has_any_role, normalize_roles
 from .database import get_db
 from .models.user import User
 from .repositories.user_repository import EmailVerificationTokenRepository, RefreshTokenRepository, UserRepository
@@ -69,6 +70,7 @@ class AuthenticatedUser:
     user: User
     token: str
     tenant_id: UUID
+    roles: tuple[str, ...] = ()
 
 
 async def get_authenticated_user(
@@ -89,4 +91,39 @@ async def get_authenticated_user(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid access token") from None
     if user is None or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid access token")
-    return AuthenticatedUser(user=user, token=credentials.credentials, tenant_id=tenant_id)
+    # Roles come from the row, not the token claim: the row is loaded either
+    # way, and reading it here means a revoked role stops working immediately
+    # rather than when the token expires. The claim exists for *external*
+    # consumers, which cannot query this database.
+    return AuthenticatedUser(
+        user=user,
+        token=credentials.credentials,
+        tenant_id=tenant_id,
+        roles=tuple(normalize_roles(user.roles)),
+    )
+
+
+def require_roles(*required: str):
+    """Dependency factory: allow the request only if it holds one of ``required``.
+
+    A superuser role satisfies every requirement (see ``core.roles``), so new
+    gates never need the admin list updated.
+
+    Status codes carry meaning for API clients: 401 covers "who are you?" and
+    is raised by ``get_authenticated_user``; 403 means the caller is known but
+    lacks the role, so the client should not prompt for a new login.
+    """
+    if not required:
+        raise ValueError("require_roles() needs at least one role")
+
+    async def guard(
+        current: AuthenticatedUser = Depends(get_authenticated_user),
+    ) -> AuthenticatedUser:
+        if not has_any_role(current.roles, required):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Insufficient role",
+            )
+        return current
+
+    return guard

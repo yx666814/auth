@@ -49,3 +49,22 @@ class UserResponse(BaseModel):
     id: str
     email: EmailStr
     email_verified: bool
+    roles: list[str] = Field(default_factory=list)
+
+
+class RoleInfo(BaseModel):
+    name: str
+    description: str
+
+
+class AdminUserResponse(BaseModel):
+    id: str
+    email: str
+    roles: list[str]
+    is_active: bool
+    email_verified: bool
+    created_at: str
+
+
+class SetRolesRequest(BaseModel):
+    roles: list[str] = Field(min_length=1, max_length=32)

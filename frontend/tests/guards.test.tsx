@@ -11,6 +11,7 @@ const profile = {
   email: 'a@b.co',
   email_verified: true,
   is_active: true,
+  roles: ['user'],
   created_at: '2024-01-01T00:00:00Z',
 }
 

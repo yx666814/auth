@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 import redis.asyncio as redis
 
+from .api.admin import router as admin_router
 from .api.auth import router as auth_router
 from .api.user import router as user_router
 from .database import engine
@@ -66,6 +67,7 @@ app.add_middleware(
 app.add_middleware(SecurityHeadersMiddleware)
 app.include_router(auth_router, prefix="/api")
 app.include_router(user_router, prefix="/api")
+app.include_router(admin_router, prefix="/api")
 
 
 @app.get("/health", include_in_schema=False)

@@ -4,14 +4,15 @@ Repository 层 - 企业级多租户版本
 不处理 commit，只处理数据访问
 """
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import and_, case, select, update
-from typing import Optional
+from sqlalchemy import and_, case, func, or_, select, update
+from typing import Optional, Sequence
 from dataclasses import dataclass
 from uuid import UUID  # 关键修正：从 uuid 模块导入 UUID，不是 typing
 from ..models.user import User, RefreshToken, EmailVerificationToken
 from datetime import datetime, timezone, timedelta
 import hashlib
 from ..core.config import settings
+from ..core.roles import DEFAULT_ROLES, SUPERUSER_ROLES, normalize_roles
 from ..core.security import create_refresh_token
 
 
@@ -60,7 +61,8 @@ class UserRepository:
         self,
         email: str,
         password_hash: str,
-        created_by: Optional[UUID] = None
+        created_by: Optional[UUID] = None,
+        roles: Optional[Sequence[str]] = None,
     ) -> User:
         """
         创建新用户
@@ -69,6 +71,7 @@ class UserRepository:
             email: 用户邮箱
             password_hash: 加密后的密码
             created_by: 创建者ID（审计）
+            roles: 初始角色；默认 DEFAULT_ROLES（即 ["user"]）
 
         Returns:
             新创建的 User 对象
@@ -78,6 +81,7 @@ class UserRepository:
             email=email,
             password_hash=password_hash,
             email_verified=False,
+            roles=normalize_roles(roles) or list(DEFAULT_ROLES),
             created_by=created_by
         )
 
@@ -159,6 +163,56 @@ class UserRepository:
                 updated_by=user.id
             )
         )
+
+    async def list_users(self, limit: int = 50, offset: int = 0) -> list[User]:
+        """租户内用户列表，按创建时间排序（管理接口用）。"""
+        result = await self.db.execute(
+            select(User)
+            .where(and_(User.tenant_id == self.tenant_id, User.deleted_at.is_(None)))
+            .order_by(User.created_at.asc(), User.id.asc())
+            .limit(limit)
+            .offset(offset)
+        )
+        return list(result.scalars().all())
+
+    async def set_roles(self, user: User, roles: Sequence[str], updated_by: Optional[UUID] = None) -> list[str]:
+        """Replace a user's roles. Returns the normalized list that was stored.
+
+        The caller is responsible for ``commit``.
+        """
+        normalized = normalize_roles(roles)
+        await self.db.execute(
+            update(User).where(
+                and_(
+                    User.id == user.id,
+                    User.tenant_id == self.tenant_id,
+                    User.deleted_at.is_(None),
+                )
+            ).values(roles=normalized, updated_by=updated_by or user.id)
+        )
+        await self.db.refresh(user, attribute_names=["roles"])
+        return normalized
+
+    async def count_superusers(self, exclude_user_id: Optional[UUID] = None) -> int:
+        """How many active superusers the tenant still has.
+
+        Guards the last-admin case: demoting the only admin would leave the
+        deployment with no way back in through the API. ``@>`` containment is
+        resolved by Postgres against the JSONB column, so this stays an indexable
+        filter instead of a Python-side scan.
+        """
+        clauses = [
+            User.tenant_id == self.tenant_id,
+            User.deleted_at.is_(None),
+            User.is_active.is_(True),
+            or_(*[User.roles.contains([role]) for role in sorted(SUPERUSER_ROLES)]),
+        ]
+        if exclude_user_id is not None:
+            clauses.append(User.id != exclude_user_id)
+        result = await self.db.execute(
+            select(func.count()).select_from(User).where(and_(*clauses))
+        )
+        return int(result.scalar_one())
 
 
 class RefreshTokenRepository:

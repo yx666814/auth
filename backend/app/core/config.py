@@ -23,8 +23,19 @@ class Settings(BaseSettings):
     REDIS_DB: int = 0
     REDIS_PASSWORD: str | None = None
     REDIS_MAX_CONNECTIONS: int = 50
-    JWT_SECRET_KEY: str = ""
-    JWT_ALGORITHM: str = "HS256"
+    # Access tokens are signed RS256 so other systems can verify them against
+    # the public JWKS without being able to mint their own. The private key is
+    # given either inline (env var) or as a path to a mounted file.
+    JWT_PRIVATE_KEY: str | None = None
+    JWT_PRIVATE_KEY_PATH: str | None = None
+    JWT_PUBLIC_KEY: str | None = None
+    JWT_PUBLIC_KEY_PATH: str | None = None
+    JWT_KEY_ID: str = "auth-1"
+    # Retired public keys, as a JSON object of kid -> PEM. Tokens they signed
+    # keep verifying until they expire, so rotation does not sign users out.
+    JWT_PREVIOUS_PUBLIC_KEYS: str | None = None
+    JWT_PREVIOUS_PUBLIC_KEYS_PATH: str | None = None
+    JWT_ALGORITHM: str = "RS256"
     JWT_ISSUER: str = "enterprise-auth-system"
     JWT_AUDIENCE: str = "enterprise-auth-api"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
@@ -44,6 +55,11 @@ class Settings(BaseSettings):
     CAPTCHA_EXPIRE_SECONDS: int = 300
     CAPTCHA_FONT_PATH: str | None = None
     DEFAULT_TENANT_ID: UUID = UUID("550e8400-e29b-41d4-a716-446655440000")
+    # The first administrator cannot be granted by an administrator, so this
+    # list names the addresses that receive the admin role at registration.
+    # Anything not in it gets DEFAULT_ROLES. Leave it empty and promote through
+    # the database instead (see README: bootstrapping the first admin).
+    BOOTSTRAP_ADMIN_EMAILS: list[str] = Field(default_factory=list)
     DEFAULT_TENANT_SLUG: str = "default"
     DEFAULT_TENANT_NAME: str = "Default Tenant"
     ALLOWED_ORIGINS: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
@@ -57,10 +73,29 @@ class Settings(BaseSettings):
     def normalize_frontend_url(cls, value: str) -> str:
         return value.rstrip("/")
 
+    @field_validator("BOOTSTRAP_ADMIN_EMAILS")
+    @classmethod
+    def normalize_bootstrap_emails(cls, value: list[str]) -> list[str]:
+        # Compare the way login does: lower-cased and trimmed, or the match
+        # silently misses an address because of a stray space in the env var.
+        return sorted({email.strip().lower() for email in value if email and email.strip()})
+
     @model_validator(mode="after")
     def validate_security(self) -> "Settings":
-        if (not self.JWT_SECRET_KEY or len(self.JWT_SECRET_KEY) < 32) and not self.DEBUG:
-            raise ValueError("JWT_SECRET_KEY must be at least 32 characters outside development")
+        if not self.DEBUG and not (
+            self.JWT_PRIVATE_KEY
+            or self.JWT_PRIVATE_KEY_PATH
+            # A public key alone cannot sign, but allows verification-only
+            # consumers (another service sharing this settings class) to start.
+            or self.JWT_PUBLIC_KEY
+            or self.JWT_PUBLIC_KEY_PATH
+        ):
+            raise ValueError(
+                "JWT_PRIVATE_KEY, JWT_PRIVATE_KEY_PATH, JWT_PUBLIC_KEY or "
+                "JWT_PUBLIC_KEY_PATH is required outside development"
+            )
+        if self.JWT_ALGORITHM != "RS256":
+            raise ValueError("JWT_ALGORITHM must be RS256; HS256 shares a secret with verifiers")
         return self
 
     @property

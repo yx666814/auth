@@ -1,6 +1,7 @@
 """Security primitives for passwords, JWTs and request-scoped Redis."""
 
 from __future__ import annotations
+from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 import secrets
@@ -10,6 +11,7 @@ from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError, InvalidHash, VerificationError
 import redis.asyncio as redis
 from .config import settings
+from .jwt_keys import ACCESS_TOKEN_TYPE, get_key_manager
 
 
 ph = PasswordHasher(
@@ -56,10 +58,14 @@ def should_rehash_password(password_hash: str) -> bool:
 def create_access_token(
     user_id: str,
     tenant_id: str,
+    roles: Sequence[str] = (),
     expires_delta: Optional[timedelta] = None,
 ) -> tuple[str, str]:
     """
     创建 Access Token。
+
+    The token names the signing key in its ``kid`` header so verifiers can pick
+    the right public key out of the JWKS during a rotation.
 
     Returns:
         (token, jti)
@@ -73,11 +79,17 @@ def create_access_token(
         else timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     )
 
+    manager = get_key_manager()
     payload = {
         "sub": user_id,
         "tenant_id": tenant_id,
         "jti": jti,
         "type": "access",
+        # Roles ride in the token so a downstream system can authorise a
+        # request without calling back here. They are therefore a snapshot:
+        # a role change takes effect on the next login or refresh, at most
+        # ACCESS_TOKEN_EXPIRE_MINUTES later.
+        "roles": sorted(set(roles)),
         "iat": now,
         "exp": expire,
         "iss": settings.JWT_ISSUER,
@@ -86,8 +98,9 @@ def create_access_token(
 
     token = jwt.encode(
         payload,
-        settings.JWT_SECRET_KEY,
+        manager.private_key,
         algorithm=settings.JWT_ALGORITHM,
+        headers={"kid": manager.kid, "typ": ACCESS_TOKEN_TYPE},
     )
     return token, jti
 
@@ -108,10 +121,22 @@ def decode_access_token(
         jwt.ExpiredSignatureError
         jwt.InvalidTokenError
     """
+    manager = get_key_manager()
+    try:
+        header = jwt.get_unverified_header(token)
+    except jwt.InvalidTokenError as e:
+        raise jwt.InvalidTokenError(f"无效的 Access Token: {e}") from e
+
+    key = manager.verification_key(header.get("kid"))
+    if key is None:
+        # Unknown kid: either a token from a retired key we no longer publish,
+        # or a forgery. Both are rejected the same way.
+        raise jwt.InvalidTokenError("未知的签名密钥")
+
     try:
         payload = jwt.decode(
             token,
-            settings.JWT_SECRET_KEY,
+            key,
             algorithms=[settings.JWT_ALGORITHM],
             issuer=settings.JWT_ISSUER,
             audience=settings.JWT_AUDIENCE,
@@ -127,6 +152,8 @@ def decode_access_token(
 
     if payload.get("type") != "access":
         raise jwt.InvalidTokenError("无效的 token 类型")
+    if not isinstance(payload.get("roles"), list):
+        raise jwt.InvalidTokenError("无效的 roles 声明")
     if expected_tenant_id is not None and payload.get("tenant_id") != str(expected_tenant_id):
         raise jwt.InvalidTokenError("token 租户上下文不匹配")
 

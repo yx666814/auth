@@ -31,11 +31,13 @@ export interface UserProfile {
   email: string
   email_verified: boolean
   is_active: boolean
+  /** Snapshot from the account row; drives client-side gating only. */
+  roles: string[]
   created_at: string
 }
 
 export interface LoginResult extends TokenPair {
-  user: { id: string; email: string; email_verified: boolean }
+  user: { id: string; email: string; email_verified: boolean; roles: string[] }
 }
 
 export interface CaptchaChallenge {

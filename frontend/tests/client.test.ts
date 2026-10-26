@@ -25,7 +25,7 @@ describe('ApiClient', () => {
 
   it('stores the token pair returned by login', async () => {
     const fetchMock = vi.fn(async () =>
-      json({ ...tokens(1), user: { id: 'u1', email: 'a@b.co', email_verified: false } }),
+      json({ ...tokens(1), user: { id: 'u1', email: 'a@b.co', email_verified: false, roles: [] } }),
     )
     vi.stubGlobal('fetch', fetchMock)
 

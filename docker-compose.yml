@@ -69,7 +69,12 @@ services:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-auth}:${POSTGRES_PASSWORD:-auth}@postgres:5432/${POSTGRES_DB:-authdb}
       REDIS_HOST: redis
       REDIS_PORT: "6379"
-      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-development-only-secret-change-me-please-32}
+      # No signing key: DEBUG=true makes the backend mint an ephemeral RSA pair
+      # on start. Tokens therefore die with the process (a --reload restart
+      # signs everyone out), which is fine locally and impossible in prod,
+      # where a key is mandatory. To keep one key across restarts, uncomment
+      # this and mount the file:
+      #   JWT_PRIVATE_KEY_PATH: /run/secrets/jwt-private.pem
       JWT_ISSUER: ${JWT_ISSUER:-enterprise-auth-system}
       JWT_AUDIENCE: ${JWT_AUDIENCE:-enterprise-auth-api}
       SMTP_HOST: mailhog

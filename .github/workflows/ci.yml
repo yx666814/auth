@@ -54,7 +54,8 @@ jobs:
       REDIS_HOST: localhost
       REDIS_PORT: "6379"
       REDIS_DB: "15"
-      JWT_SECRET_KEY: ci-only-secret-key-that-is-at-least-32-characters
+      # No signing key: DEBUG=true makes the backend mint an ephemeral RSA pair,
+      # so CI needs no secret and no fixture file.
       SMTP_HOST: localhost
       SMTP_PORT: "1025"
       FRONTEND_URL: http://localhost:5173

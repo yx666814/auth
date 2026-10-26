@@ -2,10 +2,11 @@
 """
 用户数据库模型 - 企业级多租户版本
 """
-from sqlalchemy import Column, String, Boolean, Integer, DateTime, func, ForeignKey, Index
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import Column, String, Boolean, Integer, DateTime, func, ForeignKey, Index, text
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 import uuid
 from ..database import Base
+from ..core.roles import DEFAULT_ROLES
 
 
 class Tenant(Base):
@@ -37,6 +38,16 @@ class User(Base):
     failed_login_attempts = Column(Integer, default=0)
     locked_until = Column(DateTime(timezone=True), nullable=True)
 
+    # 角色列表，例如 ["user"] 或 ["admin", "user"]。
+    # A JSONB list rather than a join table: the set is small, always read in
+    # full with the row, and copied verbatim into the access token.
+    roles = Column(
+        JSONB,
+        nullable=False,
+        default=lambda: list(DEFAULT_ROLES),
+        server_default=text("'[\"user\"]'::jsonb"),
+    )
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -50,6 +61,8 @@ class User(Base):
     # 复合索引：租户 + 邮箱（确保邮箱在租户内唯一）
     __table_args__ = (
         Index('ix_users_tenant_email', 'tenant_id', 'email', unique=True),
+        # 角色查询（“这个用户是否持有 admin？”）走 JSONB 包含运算
+        Index('ix_users_roles', 'roles', postgresql_using='gin'),
     )
 
 

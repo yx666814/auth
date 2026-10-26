@@ -26,7 +26,16 @@ data:
   REDIS_MAX_CONNECTIONS: "50"
   JWT_ISSUER: enterprise-auth-system
   JWT_AUDIENCE: enterprise-auth-api
+  JWT_KEY_ID: auth-1
   ACCESS_TOKEN_EXPIRE_MINUTES: "15"
+  # One-time bootstrap for the first administrator. An address listed here is
+  # created with the admin role when it registers; every other registration
+  # gets "user" only, so this cannot be used to self-promote.
+  #
+  # Empty here on purpose: fill in your own address *before* it registers, then
+  # reset to "[]" once it has promoted a second admin. An entry is only ever
+  # read at registration time, so leaving one behind has no further effect.
+  BOOTSTRAP_ADMIN_EMAILS: "[]"
   REFRESH_TOKEN_EXPIRE_DAYS: "7"
   MAX_LOGIN_ATTEMPTS: "5"
   LOCKOUT_DURATION_MINUTES: "15"

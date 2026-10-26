@@ -5,6 +5,9 @@
 !backend/.env.example
 !frontend/.env.example
 
+# RS256 signing keys (scripts/generate-jwt-key.sh writes here).
+secrets/
+
 # Python
 __pycache__/
 *.py[cod]
